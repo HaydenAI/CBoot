@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020, NVIDIA Corporation.  All Rights Reserved.
+ * Copyright (c) 2016-2021, NVIDIA Corporation.  All Rights Reserved.
  *
  * NVIDIA CORPORATION and its licensors retain all intellectual property
  * and proprietary rights in and to this software, related documentation
@@ -38,6 +38,9 @@
 #include <tegrabl_usbh.h>
 #include <tegrabl_usbmsd_bdev.h>
 #include <tegrabl_usbmsd.h>
+#endif
+#if defined(CONFIG_ENABLE_NVME_BOOT)
+#include <tegrabl_nvme.h>
 #endif
 #include <tegrabl_board_info.h>
 #include <tegrabl_malloc.h>
@@ -185,6 +188,8 @@ tegrabl_error_t init_storage_device(struct tegrabl_device_config_params *device_
 	uint8_t flag = 0U;
 #if defined(CONFIG_ENABLE_SDCARD)
 	struct tegrabl_sd_platform_params sd_params;
+	struct tegrabl_device_config_params_extended *dev_config_ext;
+	struct tegrabl_device_config_sdcard_params *sdcard_dev_config;
 	uint32_t sd_instance = 0;
 	bool is_present = 0;
 #endif
@@ -312,20 +317,36 @@ tegrabl_error_t init_storage_device(struct tegrabl_device_config_params *device_
 
 #if defined(CONFIG_ENABLE_SDCARD)
 	case TEGRABL_STORAGE_SDCARD:
-		err = tegrabl_sd_get_platform_params(&sd_instance, &sd_params);
-		if (err != TEGRABL_NO_ERROR) {
-			pr_warn("Error: failed to get sd-card params\n");
+		device = "sdcard";
+		dev_config_ext = (struct tegrabl_device_config_params_extended *)device_config;
+		sdcard_dev_config = &dev_config_ext->sdcard;
+		if (sdcard_dev_config->magic_header == MAGIC_HEADER) {
+			sd_instance = sdcard_dev_config->instance;
+			sd_params.cd_gpio.pin = sdcard_dev_config->cd_gpio;
+			sd_params.cd_gpio.flags = sdcard_dev_config->cd_gpio_polarity;
+			sd_params.en_vdd_sd_gpio = sdcard_dev_config->en_vdd_sd_gpio;
+			sd_params.vmmc_supply = 0;
+			source = "mb1 bct";
 		} else {
-			err = sd_bdev_is_card_present(&sd_params.cd_gpio, &is_present);
+			err = tegrabl_sd_get_platform_params(&sd_instance, &sd_params);
 			if (err != TEGRABL_NO_ERROR) {
-				pr_warn("No SD-card present !!\n");
+				pr_warn("Ignoring error getting sd-card params\n");
 				/* NO_ERROR to attempt booting from other sources */
 				err = TEGRABL_NO_ERROR;
-			} else if (is_present) {
-				err = sd_bdev_open(sd_instance, &sd_params);
-				if (err != TEGRABL_NO_ERROR) {
-					pr_warn("Error opening sdcard-%d\n", sd_instance);
-				}
+				break;
+			}
+			source = "DT-BL";
+		}
+
+		err = sd_bdev_is_card_present(&sd_params.cd_gpio, &is_present);
+		if (err != TEGRABL_NO_ERROR) {
+			pr_warn("No SD-card present !!\n");
+			/* NO_ERROR to attempt booting from other sources */
+			err = TEGRABL_NO_ERROR;
+		} else if (is_present) {
+			err = sd_bdev_open(sd_instance, &sd_params);
+			if (err != TEGRABL_NO_ERROR) {
+				pr_warn("Error opening sdcard-%d\n", sd_instance);
 			}
 		}
 		break;
@@ -347,6 +368,18 @@ tegrabl_error_t init_storage_device(struct tegrabl_device_config_params *device_
 		}
 		break;
 #endif	/* USB_MS */
+#if defined(CONFIG_ENABLE_NVME_BOOT)
+	case TEGRABL_STORAGE_NVME:
+		device = "nvme";
+		/* source = "??? params"; */
+		err = tegrabl_nvme_bdev_open(instance);
+		if (err != TEGRABL_NO_ERROR) {
+			pr_warn("Failed to open NVME-%d, err = %x\n", instance, err);
+			goto fail;
+		}
+		break;
+#endif
+
 	default:
 		pr_error("Failed: Unknown device %d\n", (uint32_t)device_type);
 		flag = 1U;
@@ -380,6 +413,7 @@ tegrabl_error_t config_storage(struct tegrabl_device_config_params *device_confi
 	uint32_t boot_dev_instance;
 	uint32_t i = 0;
 	static tegrabl_storage_type_t mb1_bct_to_blockdev_type[TEGRABL_BOOT_DEV_MAX] = {
+		[TEGRABL_BOOT_DEV_NONE] = TEGRABL_STORAGE_INVALID,
 		[TEGRABL_BOOT_DEV_SDMMC_BOOT] = TEGRABL_STORAGE_SDMMC_BOOT,
 		[TEGRABL_BOOT_DEV_SDMMC_USER] = TEGRABL_STORAGE_SDMMC_USER,
 		[TEGRABL_BOOT_DEV_SDMMC_RPMB] = TEGRABL_STORAGE_SDMMC_RPMB,
@@ -389,7 +423,14 @@ tegrabl_error_t config_storage(struct tegrabl_device_config_params *device_confi
 		[TEGRABL_BOOT_DEV_UFS_USER] = TEGRABL_STORAGE_UFS_USER,
 		[TEGRABL_BOOT_DEV_SDCARD] = TEGRABL_STORAGE_SDCARD,
 	};
-	uint8_t instance;
+	uint8_t instance = 0;
+#if defined(CONFIG_OS_IS_L4T)
+	bool is_storage_list = false;
+	static uint8_t storage_to_boot_dev_type[TEGRABL_STORAGE_MAX] = {
+		[TEGRABL_STORAGE_SDMMC_USER] = TEGRABL_BOOT_DEV_SDMMC_USER,
+		[TEGRABL_STORAGE_SDCARD] = TEGRABL_BOOT_DEV_SDCARD,
+	};
+#endif
 
 	TEGRABL_UNUSED(device_config);
 
@@ -415,6 +456,21 @@ tegrabl_error_t config_storage(struct tegrabl_device_config_params *device_confi
 	}
 
 	for (i = 0; i < TEGRABL_MAX_STORAGE_DEVICES; i++) {
+#if defined(CONFIG_OS_IS_L4T)
+		/* Either SDCARD or SDMMC_USER is device list */
+		if (devices[i].type == TEGRABL_BOOT_DEV_SDCARD ||
+			devices[i].type == TEGRABL_BOOT_DEV_SDMMC_USER) {
+			is_storage_list = true;
+		}
+
+		if ((devices[i].type == TEGRABL_BOOT_DEV_NONE) && is_storage_list) {
+			break;
+		}
+
+		if ((devices[i].type >= TEGRABL_BOOT_DEV_MAX) && is_storage_list) {
+			continue;
+		}
+#else
 		if (devices[i].type == TEGRABL_BOOT_DEV_NONE) {
 			break;
 		}
@@ -422,6 +478,7 @@ tegrabl_error_t config_storage(struct tegrabl_device_config_params *device_confi
 		if (devices[i].type >= TEGRABL_BOOT_DEV_MAX) {
 			continue;
 		}
+#endif
 
 		device = mb1_bct_to_blockdev_type[devices[i].type];
 
@@ -433,6 +490,17 @@ tegrabl_error_t config_storage(struct tegrabl_device_config_params *device_confi
 		/* Correct device_type/instance  on XNX using board ID SKU */
 		instance = devices[i].instance;
 		device = correct_device_and_instance(device, &instance);
+#if defined(CONFIG_OS_IS_L4T)
+		if (devices[i].type == TEGRABL_BOOT_DEV_NONE) {
+			if (device >= TEGRABL_STORAGE_MAX) {
+				break;
+			}
+			/* Add the corrected device to the devices list */
+			devices[i].instance = instance;
+			devices[i].type = storage_to_boot_dev_type[device];
+			is_storage_list = true;
+		}
+#endif
 
 		err = init_storage_device(device_config, device, instance);
 		if (err != TEGRABL_NO_ERROR) {

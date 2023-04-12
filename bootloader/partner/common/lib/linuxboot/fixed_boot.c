@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2020, NVIDIA Corporation.  All Rights Reserved.
+ * Copyright (c) 2019-2021, NVIDIA Corporation.  All Rights Reserved.
  *
  * NVIDIA Corporation and its licensors retain all intellectual property and
  * proprietary rights in and to this software and related documentation.  Any
@@ -26,23 +26,56 @@
 #include <extlinux_boot.h>
 #endif
 #include <fixed_boot.h>
+#if defined(CONFIG_ENABLE_A_B_SLOT)
+#include <tegrabl_a_b_boot_control.h>
+#endif
 
 #define KERNEL_DTBO_PART_SIZE	 (1024 * 1024 * 1)
 
-static tegrabl_error_t tegrabl_load_from_partition(struct tegrabl_kernel_bin *kernel,
-												   void **boot_img_load_addr,
-												   void **dtb_load_addr,
-												   void **kernel_dtbo,
-												   void *data,
-												   uint32_t data_size)
+struct tegrabl_img_dtb_fdt {
+	char *img_name_str;
+	char *dtb_name_str;
+	uint32_t img_bin_type;
+	uint32_t dtb_bin_type;
+	uint32_t preload_dtb_bin_type;
+} img_dtb_fdt_table[] = {
+	{
+		.img_name_str = "kernel",
+		.dtb_name_str = "kernel-dtb",
+		.img_bin_type = TEGRABL_BINARY_KERNEL,
+		.dtb_bin_type = TEGRABL_BINARY_KERNEL_DTB,
+		.preload_dtb_bin_type = TEGRABL_DT_KERNEL
+	},
+#if defined(CONFIG_ENABLE_L4T_RECOVERY)
+	{
+		.img_name_str = "recovery",
+		.dtb_name_str = "recovery-dtb",
+		.img_bin_type = TEGRABL_BINARY_RECOVERY_IMG,
+		.dtb_bin_type = TEGRABL_BINARY_RECOVERY_DTB,
+		.preload_dtb_bin_type = TEGRABL_DT_INVALID
+	},
+#endif
+};
+
+static tegrabl_error_t
+tegrabl_load_from_partition(struct tegrabl_kernel_bin *kernel,
+			    void **boot_img_load_addr, void **dtb_load_addr,
+			    void **kernel_dtbo,
+			    void *data, uint32_t data_size,
+			    bool boot_to_recovery)
 {
 	uint32_t boot_img_size;
 	tegrabl_error_t err = TEGRABL_NO_ERROR;
-#if defined(CONFIG_ENABLE_L4T_RECOVERY)
-	struct tegrabl_kernel_bootctrl *bootctrl = NULL;
-#endif
+	struct tegrabl_img_dtb_fdt *img_dtb_fdt = NULL;
 
 	TEGRABL_UNUSED(kernel_dtbo);
+	TEGRABL_UNUSED(boot_to_recovery);
+
+#if defined(CONFIG_ENABLE_L4T_RECOVERY)
+	img_dtb_fdt = boot_to_recovery ? &img_dtb_fdt_table[1] : &img_dtb_fdt_table[0];
+#else
+	img_dtb_fdt = &img_dtb_fdt_table[0];
+#endif
 
 	/* Load boot image from memory */
 	if (!kernel->load_from_storage) {
@@ -57,57 +90,48 @@ static tegrabl_error_t tegrabl_load_from_partition(struct tegrabl_kernel_bin *ke
 		goto boot_image_load_done;
 	}
 
-#if !defined(CONFIG_ENABLE_L4T_RECOVERY)
-	err = tegrabl_load_binary(TEGRABL_BINARY_KERNEL, boot_img_load_addr, &boot_img_size);
-#else
-	bootctrl = &kernel->bootctrl;
-	if (bootctrl->mode == BOOT_TO_RECOVERY_MODE) {
-		err = tegrabl_load_binary(TEGRABL_BINARY_RECOVERY_IMG, boot_img_load_addr, &boot_img_size);
-	} else {
-		err = tegrabl_load_binary(TEGRABL_BINARY_KERNEL, boot_img_load_addr, &boot_img_size);
-	}
-#endif
+	err = tegrabl_load_binary(img_dtb_fdt->img_bin_type, boot_img_load_addr,
+					&boot_img_size);
 	if (err != TEGRABL_NO_ERROR) {
 		goto fail;
 	}
-	err = tegrabl_validate_binary(TEGRABL_BINARY_KERNEL, BOOT_IMAGE_MAX_SIZE, *boot_img_load_addr);
+#if defined(CONFIG_ENABLE_SECURE_BOOT)
+	err = tegrabl_validate_binary(img_dtb_fdt->img_bin_type, img_dtb_fdt->img_name_str, BOOT_IMAGE_MAX_SIZE,
+					*boot_img_load_addr, &boot_img_size);
+	if (err != TEGRABL_NO_ERROR) {
+		goto fail;
+	}
+#else
+	/* When BCH is not available, then binary size cannot be known so use buffer size */
+	boot_img_size = BOOT_IMAGE_MAX_SIZE;
+#endif  /* CONFIG_ENABLE_SECURE_BOOT */
+	err = tegrabl_verify_boot_img_hdr(*boot_img_load_addr, boot_img_size);
 	if (err != TEGRABL_NO_ERROR) {
 		goto fail;
 	}
 
 boot_image_load_done:
-	/* Load kernel_dtb if not already loaded in memory */
 #if defined(CONFIG_DT_SUPPORT)
-#if !defined(CONFIG_ENABLE_L4T_RECOVERY)
-	err = tegrabl_dt_get_fdt_handle(TEGRABL_DT_KERNEL, dtb_load_addr);
-#else
-	if (bootctrl->mode == BOOT_TO_RECOVERY_MODE) {
-		err = tegrabl_dt_get_fdt_handle(TEGRABL_DT_RECOVERY, dtb_load_addr);
-	} else {
-		err = tegrabl_dt_get_fdt_handle(TEGRABL_DT_KERNEL, dtb_load_addr);
-	}
-#endif
-
+	/* Check whether kernel dtb is already loaded in memory */
+	err = tegrabl_dt_get_fdt_handle(img_dtb_fdt->preload_dtb_bin_type, dtb_load_addr);
 	if ((err != TEGRABL_NO_ERROR) || (*dtb_load_addr == NULL)) {
-#if !defined(CONFIG_ENABLE_L4T_RECOVERY)
-		err = tegrabl_load_binary(TEGRABL_BINARY_KERNEL_DTB, dtb_load_addr, NULL);
-#else
-		if (bootctrl->mode == BOOT_TO_RECOVERY_MODE) {
-			err = tegrabl_load_binary(TEGRABL_BINARY_RECOVERY_DTB, dtb_load_addr, NULL);
-		} else {
-			err = tegrabl_load_binary(TEGRABL_BINARY_KERNEL_DTB, dtb_load_addr, NULL);
-		}
-#endif
+		/* Load kernel dtb or recovery dtb */
+		err = tegrabl_load_binary(img_dtb_fdt->dtb_bin_type,
+						dtb_load_addr, NULL);
 		if (err != TEGRABL_NO_ERROR) {
 			goto fail;
 		}
 	} else {
 		pr_info("kernel-dtb is already loaded\n");
 	}
-	err = tegrabl_validate_binary(TEGRABL_BINARY_KERNEL_DTB, DTB_MAX_SIZE, *dtb_load_addr);
+
+#if defined(CONFIG_ENABLE_SECURE_BOOT)
+	err = tegrabl_validate_binary(img_dtb_fdt->dtb_bin_type, img_dtb_fdt->dtb_name_str, DTB_MAX_SIZE,
+					*dtb_load_addr, NULL);
 	if (err != TEGRABL_NO_ERROR) {
 		goto fail;
 	}
+#endif /* CONFIG_ENABLE_SECURE_BOOT */
 #endif /* CONFIG_DT_SUPPORT */
 
 #if defined(CONFIG_DT_SUPPORT)
@@ -132,11 +156,6 @@ boot_image_load_done:
 		*dtb_load_addr = NULL;
 #endif /* CONFIG_DT_SUPPORT */
 
-	err = tegrabl_verify_boot_img_hdr(*boot_img_load_addr, boot_img_size);
-	if (err != TEGRABL_NO_ERROR) {
-		goto fail;
-	}
-
 fail:
 	return err;
 }
@@ -155,6 +174,11 @@ tegrabl_error_t fixed_boot_load_kernel_and_dtb(struct tegrabl_kernel_bin *kernel
 #if defined(CONFIG_ENABLE_EXTLINUX_BOOT)
 	struct tegrabl_bdev *bdev = NULL;
 	struct tegrabl_fm_handle *fm_handle = NULL;
+	bool kernel_from_rootfs;
+#endif
+#if defined(CONFIG_ENABLE_L4T_RECOVERY)
+	struct tegrabl_kernel_bootctrl bootctrl;
+	bool boot_to_recovery = false;
 #endif
 
 	pr_info("########## Fixed storage boot ##########\n");
@@ -165,6 +189,33 @@ tegrabl_error_t fixed_boot_load_kernel_and_dtb(struct tegrabl_kernel_bin *kernel
 		goto fail;
 	}
 
+#if defined(CONFIG_ENABLE_L4T_RECOVERY)
+	tegrabl_get_kernel_bootctrl(&bootctrl);
+	if (bootctrl.mode == BOOT_TO_RECOVERY_MODE) {
+		boot_to_recovery = true;
+	}
+#if defined(CONFIG_ENABLE_A_B_SLOT)
+	/* If no rootfs available, load recovery kernel */
+	if (tegrabl_a_b_rootfs_is_all_unbootable(NULL)) {
+		boot_to_recovery = true;
+	}
+#endif
+
+	if (boot_to_recovery) {
+		/* Load recovery kernel and kernel-dtb */
+		err = tegrabl_load_from_partition(kernel, boot_img_load_addr,
+						  dtb_load_addr, kernel_dtbo,
+						  data, data_size,
+						  true);
+		if (err != TEGRABL_NO_ERROR) {
+			pr_error("Load recovery image failed, err: %u\n", err);
+			pr_trace("Trigger SoC reset\n");
+			tegrabl_reset();
+		}
+		goto fail;
+	}
+#endif
+
 #if defined(CONFIG_ENABLE_EXTLINUX_BOOT)
 	/* Publish partitions of storage device*/
 	bdev = tegrabl_blockdev_open(TEGRABL_STORAGE_SDMMC_USER, 3);
@@ -174,22 +225,35 @@ tegrabl_error_t fixed_boot_load_kernel_and_dtb(struct tegrabl_kernel_bin *kernel
 	}
 	tegrabl_fm_publish(bdev, &fm_handle);
 
-	err = extlinux_boot_load_kernel_and_dtb(fm_handle, boot_img_load_addr, dtb_load_addr, kernel_size);
+	err = extlinux_boot_load_kernel_and_dtb(fm_handle, boot_img_load_addr, dtb_load_addr, kernel_size,
+											&kernel_from_rootfs);
 	if (err == TEGRABL_NO_ERROR) {
-		err = extlinux_boot_load_ramdisk(fm_handle, ramdisk_load_addr, ramdisk_size);
-		if (err == TEGRABL_NO_ERROR) {
-			extlinux_boot_set_status(true);
+		/* If kernel is loaded from rootfs, we need to continue to load ramdisk.
+		 * Note: if kernel is loaded from partition, it contains ramdisk already.
+		 */
+		if (kernel_from_rootfs == true) {
+			err = extlinux_boot_load_ramdisk(fm_handle, ramdisk_load_addr, ramdisk_size);
+			if (err == TEGRABL_NO_ERROR) {
+				extlinux_boot_set_status(true);
+			} else {
+				pr_error("Failed loading ramdisk\n");
+			}
 		}
 		goto fail;  /* There is no fallback for ramdisk, so let caller handle the error */
 	}
-	pr_info("Fallback: Load binaries from partition\n");
+	pr_error("Failed extlinux boot.\n");
+	goto fail;
 #else
 	TEGRABL_UNUSED(ramdisk_load_addr);
 	TEGRABL_UNUSED(kernel_size);
 	TEGRABL_UNUSED(ramdisk_size);
 #endif
 
-	err = tegrabl_load_from_partition(kernel, boot_img_load_addr, dtb_load_addr, kernel_dtbo, data, data_size);
+	/* Load normal kernel and kernel-dtb */
+	err = tegrabl_load_from_partition(kernel, boot_img_load_addr,
+					  dtb_load_addr, kernel_dtbo,
+					  data, data_size,
+					  false);
 	if (err != TEGRABL_NO_ERROR) {
 		pr_error("Storage boot failed, err: %u\n", err);
 #if defined(CONFIG_ENABLE_A_B_SLOT)

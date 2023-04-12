@@ -63,9 +63,6 @@ GLOBAL_CFLAGS += -Werror=type-limits -Werror=format-extra-args -Werror=unused-bu
 GLOBAL_CFLAGS += -Werror=uninitialized -Werror=parentheses
 GLOBAL_CFLAGS += -Wextra
 
-# Turn stack protection check off
-GLOBAL_CFLAGS += -fno-stack-protector
-
 # Treat all compilation warnings as errors
 GLOBAL_CFLAGS += -Werror
 

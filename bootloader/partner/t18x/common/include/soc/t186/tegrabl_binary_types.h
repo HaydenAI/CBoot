@@ -52,9 +52,11 @@ typedef uint32_t tegrabl_binary_type_t;
 #define TEGRABL_BINARY_RECOVERY_IMG 28U /* 0x1c */
 #define TEGRABL_BINARY_RECOVERY_DTB 29U /* 0x1d */
 #define TEGRABL_BINARY_KERNEL_BOOTCTRL 30U      /* 0x1e */
-#define TEGRABL_BINARY_MAX 31U				/* 0x1f */
+#define TEGRABL_BINARY_INVALID 31U				/* 0x1f */
+#define TEGRABL_BINARY_MAX 32U					/* 0x20 */
 #else
-#define TEGRABL_BINARY_MAX 28U				/* 0x1c */
+#define TEGRABL_BINARY_INVALID 28U			/* 0x1c */
+#define TEGRABL_BINARY_MAX 29U				/* 0x1d */
 #endif
 
 /**

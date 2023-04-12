@@ -25,6 +25,9 @@
 #if defined(CONFIG_ENABLE_DISPLAY)
 #include <tegrabl_display.h>
 #endif
+#if defined(CONFIG_ENABLE_A_B_SLOT)
+#include <tegrabl_a_b_boot_control.h>
+#endif
 
 #define TOSTR(s)       #s
 #define STRINGIFY(s)   TOSTR(s)
@@ -170,6 +173,27 @@ int tegrabl_linuxboot_add_number(char *cmdline, int len,
 		return -1;
 }
 
+#if defined(CONFIG_ENABLE_A_B_SLOT)
+static int tegrabl_linuxboot_add_rootfs_param(char *cmdline, int len,
+					      char *param, void *priv)
+{
+	tegrabl_error_t error = TEGRABL_NO_ERROR;
+	char rootfs_suffix[BOOT_CHAIN_SUFFIX_LEN + 1];
+
+	TEGRABL_UNUSED(priv);
+	if (!cmdline || !param) {
+		return -1;
+	}
+
+	error = tegrabl_a_b_get_rootfs_suffix(rootfs_suffix, false);
+	if (error != TEGRABL_NO_ERROR) {
+		return -1;
+	}
+
+	return tegrabl_linuxboot_add_string(cmdline, len, param, rootfs_suffix);
+}
+#endif
+
 #if defined(CONFIG_ENABLE_DISPLAY)
 static int tegrabl_linuxboot_add_disp_param(char *cmdline, int len, char *param, void *priv)
 {
@@ -246,10 +270,12 @@ static struct tegrabl_linuxboot_param common_params[] = {
 	{ "tzram", tegrabl_linuxboot_add_carveout,
 		(void *)((uintptr_t)TEGRABL_LINUXBOOT_CARVEOUT_TOS) },
 	{ "video", tegrabl_linuxboot_add_string, "tegrafb" },
-	{ "no_console_suspend", tegrabl_linuxboot_add_string, "1" },
 	{ "earlycon", tegrabl_linuxboot_add_earlycon, NULL},
 	{ "nvdumper_reserved", tegrabl_linuxboot_add_nvdumper_info, NULL },
 	{ "gpt", tegrabl_linuxboot_add_string, NULL },
+#if defined(CONFIG_ENABLE_A_B_SLOT)
+	{ "rootfs.slot_suffix", tegrabl_linuxboot_add_rootfs_param, NULL },
+#endif
 #if defined(CONFIG_ENABLE_DISPLAY)
 	{ "tegra_fbmem", tegrabl_linuxboot_add_disp_param, NULL },
 	{ "tegra_fbmem2", tegrabl_linuxboot_add_disp_param, NULL },
