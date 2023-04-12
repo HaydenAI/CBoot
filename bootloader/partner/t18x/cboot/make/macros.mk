@@ -11,8 +11,12 @@ LOCALIZE_DIR = $(subst $(abspath $(TEGRA_TOP))/,,$(abspath $(1)))
 TOBUILDDIR = $(abspath $(addprefix $(BUILDDIR)/,$(call LOCALIZE_DIR,$(1))))
 
 COMMA := ,
-SPACE :=
-SPACE +=
+
+# For make 4.3
+#SPACE :=
+#SPACE +=
+E =
+SPACE = $E $E
 
 # test if two files are different, replacing the first
 # with the second if so
